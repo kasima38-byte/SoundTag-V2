@@ -7,7 +7,7 @@ import { useAudioRecorder, RecordingPresets, AudioModule, useAudioRecorderState 
 const AnimatedRect = Animated.createAnimatedComponent(Rect);
 
 // Your backend URL - update this if your Codespace name changes
-const BACKEND_URL = 'https://miniature-memory-4qj4gp76jvxrfj554-8000.app.github.dev';
+const BACKEND_URL = 'https://soundtag-v2-production.up.railway.app';
 
 export default function ListenScreen({ navigation }) {
   const [isListening, setIsListening] = useState(false);
