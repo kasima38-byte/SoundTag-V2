@@ -99,6 +99,14 @@ export default function ListenScreen({ navigation }) {
         previewUrl: r.spotify?.preview_url || null,
         spotifyUrl: r.spotify?.external_urls?.spotify || null,
       };
+      // Save to local history
+      try {
+        const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+        const existing = await AsyncStorage.getItem('soundtag_history');
+        const history = existing ? JSON.parse(existing) : [];
+        history.unshift({ ...song, id: Date.now().toString(), recognized_at: new Date().toISOString() });
+        await AsyncStorage.setItem('soundtag_history', JSON.stringify(history.slice(0, 100)));
+      } catch (e) { console.log('History save error:', e); }
       setIsListening(false);
       setStatusText('Tap to identify music');
       setSubText("We'll listen and find the song");
