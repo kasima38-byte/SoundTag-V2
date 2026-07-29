@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, FlatList, Image } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Path, Circle, Rect } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { createAudioPlayer } from 'expo-audio';
 
 const FILTERS = ['All', 'Today', 'This Week', 'Favorites'];
 
@@ -32,6 +33,45 @@ export default function HistoryScreen({ navigation }) {
   const [activeFilter, setActiveFilter] = useState('All');
   const [songs, setSongs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [playingId, setPlayingId] = useState(null);
+  const playerRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (playerRef.current) {
+        playerRef.current.remove();
+        playerRef.current = null;
+      }
+    };
+  }, []);
+
+  const togglePlay = (item) => {
+    if (!item.previewUrl) return;
+
+    if (playingId === item.id) {
+      // pause currently playing preview
+      if (playerRef.current) playerRef.current.pause();
+      setPlayingId(null);
+      return;
+    }
+
+    // stop any other preview first
+    if (playerRef.current) {
+      playerRef.current.remove();
+      playerRef.current = null;
+    }
+
+    const player = createAudioPlayer({ uri: item.previewUrl });
+    playerRef.current = player;
+    player.play();
+    setPlayingId(item.id);
+
+    player.addListener('playbackStatusUpdate', (status) => {
+      if (status.didJustFinish) {
+        setPlayingId((current) => (current === item.id ? null : current));
+      }
+    });
+  };
 
   const loadHistory = useCallback(async () => {
     setLoading(true);
@@ -43,6 +83,7 @@ export default function HistoryScreen({ navigation }) {
         title: s.title || 'Unknown',
         artist: s.artist || 'Unknown',
         albumArt: s.albumArt || null,
+        previewUrl: s.previewUrl || s.preview_url || null,
         time: formatTime(s.recognized_at || new Date().toISOString()),
         favorite: !!s.favorite,
         category: getCategory(s.recognized_at || new Date().toISOString()),
@@ -88,6 +129,22 @@ export default function HistoryScreen({ navigation }) {
           </Svg>
         )}
       </View>
+      <TouchableOpacity
+        onPress={() => togglePlay(item)}
+        style={[styles.playButton, !item.previewUrl && styles.playButtonDisabled]}
+        disabled={!item.previewUrl}
+      >
+        <Svg width={14} height={14} viewBox="0 0 24 24">
+          {playingId === item.id ? (
+            <>
+              <Rect x="6" y="5" width="4" height="14" rx="1" fill={item.previewUrl ? "#FFFFFF" : "#4A4650"} />
+              <Rect x="14" y="5" width="4" height="14" rx="1" fill={item.previewUrl ? "#FFFFFF" : "#4A4650"} />
+            </>
+          ) : (
+            <Path d="M7 4l14 8-14 8V4z" fill={item.previewUrl ? "#FFFFFF" : "#4A4650"} />
+          )}
+        </Svg>
+      </TouchableOpacity>
       <View style={styles.songInfo}>
         <Text style={styles.songTitle} numberOfLines={1}>{item.title}</Text>
         <Text style={styles.songArtist} numberOfLines={1}>{item.artist}</Text>
@@ -177,6 +234,8 @@ const styles = StyleSheet.create({
   songTime: { color: '#6B6773', fontSize: 11, marginTop: 2 },
   emptyText: { color: '#8A8691', fontSize: 14, textAlign: 'center', marginTop: 60 },
   heartButton: { paddingHorizontal: 8 },
+  playButton: { width: 30, height: 30, borderRadius: 15, backgroundColor: '#9D4EDD', alignItems: 'center', justifyContent: 'center', marginRight: 10 },
+  playButtonDisabled: { backgroundColor: '#1A1220' },
   bottomNav: { flexDirection: 'row', justifyContent: 'space-around', paddingTop: 16, paddingBottom: 32, borderTopWidth: 1, borderTopColor: '#1E1626' },
   navItem: { alignItems: 'center' },
   navLabelActive: { color: '#B14EFF', fontSize: 12, marginTop: 4, fontWeight: '600' },

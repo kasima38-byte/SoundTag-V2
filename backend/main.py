@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import sqlite3
 import requests
 import os
+import subprocess
+import tempfile
 import traceback
 from datetime import datetime
 
@@ -44,6 +46,70 @@ def init_db():
 init_db()
 
 
+def enhance_audio(audio_bytes: bytes) -> bytes | None:
+    """Run AI noise reduction on the recording before fingerprinting.
+    Returns cleaned WAV bytes, or None if enhancement fails (caller should fall back to raw audio)."""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as in_file:
+            in_file.write(audio_bytes)
+            in_path = in_file.name
+        out_path = in_path.replace(".m4a", "_enhanced.wav")
+
+        # high-pass filter (cuts low rumble) -> afftdn (adaptive FFT denoiser) -> loudnorm (boosts quiet audio)
+        cmd = [
+            "ffmpeg", "-y", "-i", in_path,
+            "-af", "highpass=f=100,afftdn=nf=-25,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "44100", "-ac", "1",
+            out_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=15)
+
+        if result.returncode != 0 or not os.path.exists(out_path):
+            print(f"ffmpeg enhancement failed: {result.stderr.decode(errors='ignore')[:300]}")
+            return None
+
+        with open(out_path, "rb") as f:
+            enhanced_bytes = f.read()
+        return enhanced_bytes
+    except Exception as e:
+        print(f"enhance_audio error: {e}")
+        return None
+    finally:
+        for p in (locals().get("in_path"), locals().get("out_path")):
+            if p and os.path.exists(p):
+                os.remove(p)
+
+
+def score_confidence(audd_result: dict, used_enhanced: bool) -> tuple[str, int]:
+    """Simple confidence heuristic since AudD doesn't return a numeric score.
+    Enhanced-audio matches + rich metadata (Spotify + Apple Music both present) = higher confidence."""
+    score = 50
+    if used_enhanced:
+        score += 20
+    if audd_result.get("spotify"):
+        score += 15
+    if audd_result.get("apple_music"):
+        score += 15
+    score = min(score, 99)
+
+    if score >= 80:
+        label = "high"
+    elif score >= 60:
+        label = "medium"
+    else:
+        label = "low"
+    return label, score
+
+
+def query_audd(audio_bytes: bytes) -> dict:
+    response = requests.post(
+        "https://api.audd.io/",
+        data={"api_token": AUDD_API_TOKEN, "return": "spotify,apple_music"},
+        files={"file": audio_bytes},
+    )
+    return response.json()
+
+
 @app.get("/")
 def root():
     return {"status": "soundTag backend is running"}
@@ -55,18 +121,33 @@ async def recognize_song(file: UploadFile = File(...)):
         audio_bytes = await file.read()
         print(f"Received audio file: {len(audio_bytes)} bytes")
 
-        response = requests.post(
-            "https://api.audd.io/",
-            data={"api_token": AUDD_API_TOKEN, "return": "spotify,apple_music"},
-            files={"file": audio_bytes},
-        )
-        result = response.json()
-        print(f"AudD response: {result}")
+        # --- AI noise reduction pass ---
+        enhanced_bytes = enhance_audio(audio_bytes)
+        used_enhanced = False
+
+        if enhanced_bytes:
+            print(f"Enhanced audio: {len(enhanced_bytes)} bytes")
+            result = query_audd(enhanced_bytes)
+            print(f"AudD response (enhanced): {result}")
+            if result.get("status") == "success" and result.get("result"):
+                used_enhanced = True
+            else:
+                # fallback: retry with the original raw recording
+                result = query_audd(audio_bytes)
+                print(f"AudD response (raw fallback): {result}")
+        else:
+            # enhancement unavailable/failed - use raw audio directly
+            result = query_audd(audio_bytes)
+            print(f"AudD response (raw): {result}")
 
         if result.get("status") != "success" or not result.get("result"):
             return {"found": False, "message": "No match found"}
 
         song = result["result"]
+
+        # --- AI confidence scoring ---
+        confidence_label, confidence_score = score_confidence(song, used_enhanced)
+        print(f"Confidence: {confidence_label} ({confidence_score})")
         title = song.get("title", "Unknown")
         artist = song.get("artist", "Unknown")
         album = song.get("album", "")
@@ -127,6 +208,8 @@ async def recognize_song(file: UploadFile = File(...)):
                 "spotify_url": spotify_url,
                 "albumArt": album_art,
                 "previewUrl": preview_url,
+                "confidence": confidence_label,
+                "confidenceScore": confidence_score,
             },
         }
 
